@@ -70,9 +70,8 @@ Please make sure your wallet supports the *{AIRDROP_NETWORK}*
 """
 
 JOINED = f"""
-Application received. An admin will review your task completion.
-Approved participants receive {FEM_REWARD_AMOUNT} FEM at their FEM EVM wallet address.
-Successful payouts are announced in the campaign Telegram group.
+Application received. Completed claims are paid {FEM_REWARD_AMOUNT} FEM to your FEM EVM wallet automatically.
+Successful payouts are announced in the campaign Telegram group. The campaign pays up to 300 claims in each 24-hour period, subject to available funds.
 
 Don't forget to:
 🔸 Stay in the telegram channels

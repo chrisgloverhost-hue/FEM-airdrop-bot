@@ -19,11 +19,11 @@ This bot has all you need and very simple to use!
 - `/stats` Returns number of participants, referrals, distribution amounts
 - `/bot stop|pause|start` Manage airdrop status; stop, pause or start.
 - `/pending` Lists participants awaiting payout review, including their submitted task handles and wallet.
-- `/approve <telegram_user_id>` Sends one 40 FEM payout to the participant and posts their full wallet and transaction hash/link to the announcement group.
+- `/approve <telegram_user_id>` Retries a pending payout and posts the participant, reward, wallet, and transaction hash/link to the announcement group.
 - `/retryannouncements` Retries Telegram announcements for payouts already confirmed on-chain.
 - `/announce <message>` Posts a campaign update to the same announcement group.
 
-Payout and announcement commands only work in a private chat with the configured `ADMIN_USERNAME`. `/pending` shows saved claims for app setup, Telegram, X, TikTok follow, and TikTok likes. These actions are self-reported; the bot does not automatically verify app installation, Telegram membership, or X/TikTok activity. `/approve` broadcasts an irreversible on-chain transfer, so review task claims and the wallet before approving.
+Payout and announcement commands only work in a private chat with the configured `ADMIN_USERNAME`. After a participant submits their wallet, the bot immediately attempts to send `FEM_REWARD_AMOUNT` and announces confirmed payments with the participant's Telegram identity, wallet, and transaction link. A maximum of 300 confirmed payouts is allowed in any rolling 24-hour period, counting both automatic transfers and `/approve` retries. Claims over the limit remain pending for an admin to retry after the window resets. An insufficient reward-plus-gas balance prevents the transfer and leaves the claim available for retry after the wallet is funded. `/pending` shows saved claims for app setup, Telegram, X, TikTok follow, and TikTok likes. These actions are self-reported; the bot does not automatically verify app installation, Telegram membership, or X/TikTok activity. Automatic payouts make those checks especially important before deployment.
 
 Campaign cap: `500000` participants × `40` FEM each = `20000000` FEM total. Set `MAX_USERS=500000` and keep `REFERRAL_REWARD=0` to keep the pool at 20 million FEM. You can also post directly in the Telegram group if your account has posting rights there.
 

@@ -1,6 +1,6 @@
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import telegram
 from pymongo import ReturnDocument
@@ -34,6 +34,7 @@ from utils.tempdata import (
 )
 
 PAYOUT_LOCK = threading.Lock()
+MAX_DAILY_PAYOUTS = 300
 logger = logging.getLogger(__name__)
 
 
@@ -362,8 +363,23 @@ def end_conversation(update, context):
     # users.update({"userId": refferal}, info)
     # print("Updated refferal")
 
+    result, detail = _execute_payout(context.bot, user.id)
+    if result == "paid":
+        message = f"Your tasks are complete. {detail}"
+    elif result == "daily_limit":
+        message = (
+            "Your application is complete and saved. The 300-payout limit for the last "
+            "24 hours has been reached; an admin can retry your payout after the limit resets."
+        )
+    elif result == "insufficient_funds":
+        message = (
+            "Your application is complete and saved, but the payout wallet currently "
+            "does not have enough FEM for the reward and transaction fee."
+        )
+    else:
+        message = f"Your application is complete and saved. {detail}"
     update.message.reply_text(
-        JOINED.replace("REPLACEME", url),
+        message + "\n\n" + JOINED.replace("REPLACEME", url),
         reply_markup=get_reply_keyboard_markup(),
     )
     return LOOP
@@ -391,7 +407,7 @@ def getPendingPayouts(update, context):
         {
             "$or": [
                 {"payout_status": {"$exists": False}},
-                {"payout_status": {"$in": [None, "pending_review", "failed", "processing"]}},
+                {"payout_status": {"$in": [None, "pending_review", "failed", "processing", "insufficient_funds"]}},
             ]
         }
     ).limit(50)
@@ -421,13 +437,16 @@ def getPendingPayouts(update, context):
     )
 
 
-def _publish_payout(update, participant):
+def _publish_payout(bot, participant):
     transaction_hash = participant["payout_tx_hash"]
     tx_link = f"{FEM_TX_EXPLORER_URL}{transaction_hash}" if FEM_TX_EXPLORER_URL else transaction_hash
-    update.bot.send_message(
+    username = participant.get("username")
+    display_name = f"@{username}" if username else participant.get("name", "Telegram user")
+    bot.send_message(
         chat_id=_announcement_chat_id(),
         text=(
             "FEM airdrop payout sent\n"
+            f"User: {display_name} (ID: {participant['userId']})\n"
             f"Amount: {FEM_REWARD_AMOUNT} FEM\n"
             f"Wallet: {participant['bep20']}\n"
             f"Transaction: {tx_link}"
@@ -442,6 +461,111 @@ def _publish_payout(update, participant):
 def _announcement_chat_id():
     chat_id = FEM_ANNOUNCEMENT_CHAT_ID
     return int(chat_id) if chat_id.lstrip("-").isdigit() else chat_id
+
+
+def _execute_payout(bot, user_id):
+    with PAYOUT_LOCK:
+        participant = mongo.users.find_one({"userId": user_id})
+        if not participant:
+            return "error", "Participant not found."
+        if participant.get("payout_status") == "paid":
+            return "paid", f"Already paid: {participant.get('payout_tx_hash', 'transaction hash unavailable')}"
+        if not participant.get("bep20"):
+            return "error", "Participant has no saved FEM wallet."
+
+        cutoff = datetime.utcnow() - timedelta(hours=24)
+        recent_payouts = mongo.users.count_documents(
+            {"payout_status": "paid", "payout_paid_at": {"$gte": cutoff}}
+        )
+        if recent_payouts >= MAX_DAILY_PAYOUTS:
+            return "daily_limit", "The 300-payout limit for the last 24 hours has been reached."
+
+        raw_transaction = participant.get("payout_raw_transaction")
+        transaction_hash = participant.get("payout_tx_hash")
+        if participant.get("payout_status") != "processing":
+            participant = mongo.users.find_one_and_update(
+                {
+                    "userId": user_id,
+                    "$or": [
+                        {"payout_status": {"$exists": False}},
+                        {"payout_status": {"$in": [None, "pending_review", "failed", "insufficient_funds"]}},
+                    ],
+                },
+                {"$set": {"payout_status": "processing", "payout_started_at": datetime.utcnow()}},
+                return_document=ReturnDocument.AFTER,
+            )
+            if not participant:
+                return "error", "Payout is already being processed or completed."
+
+        if not raw_transaction or not transaction_hash:
+            try:
+                raw_transaction, transaction_hash = prepare_payout(participant["bep20"])
+            except RuntimeError as error:
+                if str(error) == "FEM payout wallet has insufficient FEM for the reward and gas":
+                    mongo.users.update_one(
+                        {"userId": user_id, "payout_status": "processing"},
+                        {"$set": {"payout_status": "insufficient_funds", "payout_error": str(error)}},
+                    )
+                    return "insufficient_funds", str(error)
+                logger.error("FEM payout preparation failed for user %s (%s)", user_id, type(error).__name__)
+                mongo.users.update_one(
+                    {"userId": user_id, "payout_status": "processing"},
+                    {"$set": {"payout_status": "pending_review", "payout_error": type(error).__name__}},
+                )
+                return "error", "Payout was not submitted due to an RPC or configuration error."
+            except Exception as error:
+                logger.error("FEM payout preparation failed for user %s (%s)", user_id, type(error).__name__)
+                mongo.users.update_one(
+                    {"userId": user_id, "payout_status": "processing"},
+                    {"$set": {"payout_status": "pending_review", "payout_error": type(error).__name__}},
+                )
+                return "error", "Payout was not submitted due to an RPC or configuration error."
+            mongo.users.update_one(
+                {"userId": user_id, "payout_status": "processing"},
+                {"$set": {"payout_raw_transaction": raw_transaction, "payout_tx_hash": transaction_hash}},
+            )
+
+        try:
+            broadcast_payout(raw_transaction, transaction_hash)
+        except RuntimeError as error:
+            if str(error) == "FEM payout transaction reverted on chain":
+                mongo.users.update_one(
+                    {"userId": user_id},
+                    {
+                        "$set": {"payout_status": "failed", "payout_error": str(error)},
+                        "$unset": {"payout_raw_transaction": ""},
+                    },
+                )
+                return "error", "The transaction reverted. An admin can review and retry the payout."
+            logger.error("FEM payout is unresolved for user %s (%s)", user_id, type(error).__name__)
+            return "error", f"Payout is still processing. Retry /approve {user_id} to check/rebroadcast the same transaction."
+        except Exception as error:
+            logger.error("FEM payout is unresolved for user %s (%s)", user_id, type(error).__name__)
+            return "error", f"Payout is still processing. Retry /approve {user_id} to check/rebroadcast the same transaction."
+
+        mongo.users.update_one(
+            {"userId": user_id},
+            {
+                "$set": {
+                    "payout_status": "paid",
+                    "payout_paid_at": datetime.utcnow(),
+                    "announcement_status": "pending",
+                },
+                "$unset": {"payout_raw_transaction": ""},
+            },
+        )
+        participant["payout_tx_hash"] = transaction_hash
+        try:
+            _publish_payout(bot, participant)
+        except Exception as error:
+            logger.error("Payout announcement failed for user %s (%s)", user_id, type(error).__name__)
+            return "paid", (
+                f"Paid {FEM_REWARD_AMOUNT} FEM to {participant['bep20']}; announcement failed. "
+                f"An admin can retry it. Transaction: {transaction_hash}"
+            )
+        return "paid", (
+            f"Paid {FEM_REWARD_AMOUNT} FEM to {participant['bep20']} and announced transaction {transaction_hash}."
+        )
 
 
 def announceUpdate(update, context):
@@ -483,118 +607,8 @@ def approvePayout(update, context):
         return
 
     user_id = int(context.args[0])
-    with PAYOUT_LOCK:
-        participant = mongo.users.find_one({"userId": user_id})
-        if not participant:
-            update.effective_message.reply_text("Participant not found.")
-            return
-        if participant.get("payout_status") == "paid":
-            update.effective_message.reply_text(
-                f"Already paid: {participant.get('payout_tx_hash', 'transaction hash unavailable')}"
-            )
-            return
-        if not participant.get("bep20"):
-            update.effective_message.reply_text("Participant has no saved FEM wallet.")
-            return
-
-        raw_transaction = participant.get("payout_raw_transaction")
-        transaction_hash = participant.get("payout_tx_hash")
-        if participant.get("payout_status") != "processing":
-            participant = mongo.users.find_one_and_update(
-                {
-                    "userId": user_id,
-                    "$or": [
-                        {"payout_status": {"$exists": False}},
-                        {"payout_status": {"$in": [None, "pending_review", "failed"]}},
-                    ],
-                },
-                {"$set": {"payout_status": "processing", "payout_started_at": datetime.utcnow()}},
-                return_document=ReturnDocument.AFTER,
-            )
-            if not participant:
-                update.effective_message.reply_text("Payout is already being processed or completed.")
-                return
-
-        if not raw_transaction or not transaction_hash:
-            try:
-                raw_transaction, transaction_hash = prepare_payout(participant["bep20"])
-            except Exception as error:
-                logger.error(
-                    "FEM payout preparation failed for user %s (%s)",
-                    user_id,
-                    type(error).__name__,
-                )
-                mongo.users.update_one(
-                    {"userId": user_id, "payout_status": "processing"},
-                    {
-                        "$set": {
-                            "payout_status": "pending_review",
-                            "payout_error": type(error).__name__,
-                        }
-                    },
-                )
-                update.effective_message.reply_text(
-                    "Payout not submitted due to an RPC or configuration error. Check Railway logs."
-                )
-                return
-            mongo.users.update_one(
-                {"userId": user_id, "payout_status": "processing"},
-                {
-                    "$set": {
-                        "payout_raw_transaction": raw_transaction,
-                        "payout_tx_hash": transaction_hash,
-                    }
-                },
-            )
-
-        try:
-            broadcast_payout(raw_transaction, transaction_hash)
-        except RuntimeError as error:
-            if str(error) == "FEM payout transaction reverted on chain":
-                mongo.users.update_one(
-                    {"userId": user_id},
-                    {
-                        "$set": {"payout_status": "failed", "payout_error": str(error)},
-                        "$unset": {"payout_raw_transaction": ""},
-                    },
-                )
-                update.effective_message.reply_text("The transaction reverted. Review and retry approval.")
-            else:
-                logger.error("FEM payout is unresolved for user %s (%s)", user_id, type(error).__name__)
-                update.effective_message.reply_text(
-                    f"Payout is still processing. Retry /approve {user_id} to check/rebroadcast the same transaction."
-                )
-            return
-        except Exception as error:
-            logger.error("FEM payout is unresolved for user %s (%s)", user_id, type(error).__name__)
-            update.effective_message.reply_text(
-                f"Payout is still processing. Retry /approve {user_id} to check/rebroadcast the same transaction."
-            )
-            return
-
-        mongo.users.update_one(
-            {"userId": user_id},
-            {
-                "$set": {
-                    "payout_status": "paid",
-                    "payout_paid_at": datetime.utcnow(),
-                    "announcement_status": "pending",
-                },
-                "$unset": {"payout_raw_transaction": ""},
-            },
-        )
-        participant["payout_tx_hash"] = transaction_hash
-        try:
-            _publish_payout(update, participant)
-        except Exception as error:
-            logger.error("Payout announcement failed for user %s (%s)", user_id, type(error).__name__)
-            update.effective_message.reply_text(
-                f"Paid {FEM_REWARD_AMOUNT} FEM. Announcement failed; /retryannouncements can retry it. Transaction: {transaction_hash}"
-            )
-            return
-        update.effective_message.reply_text(
-            f"Paid {FEM_REWARD_AMOUNT} FEM to {participant['bep20']} and announced transaction {transaction_hash}."
-        )
+    _, detail = _execute_payout(update.bot, user_id)
+    update.effective_message.reply_text(detail)
 
 
 def retryPayoutAnnouncements(update, context):
@@ -606,7 +620,7 @@ def retryPayoutAnnouncements(update, context):
     sent = 0
     for participant in pending:
         try:
-            _publish_payout(update, participant)
+            _publish_payout(update.bot, participant)
             sent += 1
         except Exception as error:
             logger.error(

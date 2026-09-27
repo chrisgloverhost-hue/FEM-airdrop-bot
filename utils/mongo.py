@@ -1,13 +1,18 @@
 import pymongo
-from utils.env import MONGO_USER, MONGO_PASSWORD, MONGO_IP, MONGO_PORT
+from utils.env import MONGO_IP, MONGO_PASSWORD, MONGO_PORT, MONGO_URI, MONGO_USER
 
 
-CONNECTION_STRING = (
-    f"mongodb://{MONGO_USER}:{MONGO_PASSWORD}@{MONGO_IP}:{MONGO_PORT}/?authSource=admin"
-)
+if MONGO_URI:
+    CONNECTION_STRING = MONGO_URI
+elif MONGO_IP and MONGO_USER and MONGO_PASSWORD:
+    CONNECTION_STRING = (
+        f"mongodb://{MONGO_USER}:{MONGO_PASSWORD}@{MONGO_IP}:{MONGO_PORT}/?authSource=admin"
+    )
+else:
+    raise ValueError("Set MONGO_URI or the MONGO_INITDB connection variables")
 
 
-myclient = pymongo.MongoClient(CONNECTION_STRING)
+myclient = pymongo.MongoClient(CONNECTION_STRING, serverSelectionTimeoutMS=10000)
 mydb = myclient["airdrop"]
 users = mydb["users"]
 users.create_index(
@@ -20,9 +25,5 @@ def getUserInfo(id):
     user = ""
     for x in users.find({"userId": id}):
         user = x
-        refs = users.find({"ref": str(id)})
-        user["refCount"] = refs.count()
-        # if "refCount" not in user:
-        # user["refCount"] = 0
-        # user["refList"] = []
+        user["refCount"] = users.count_documents({"ref": str(id)})
     return user

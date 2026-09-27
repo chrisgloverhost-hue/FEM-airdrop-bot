@@ -26,9 +26,11 @@ PROCEED_MESSAGE = f"""
 📢 Airdrop Rules
 
 ✏️ Mandatory Tasks:
+- Download and set up the FEM app: {FEM_APP_LINK}
 - Join our telegram channels
 - Follow our X (Twitter) page
-- Follow our TikTok page
+- Follow our TikTok profile: {TIKTOK_LINKS}
+- Follow and like our TikTok post(s): {TIKTOK_VIDEO_LINKS}
 
 NOTE: Users found Cheating would be disqualified & banned immediately.
 
@@ -37,7 +39,9 @@ Airdrop Date: *{AIRDROP_DATE}*{EXPLORER_URL}
 """
 
 MAKE_SURE_TELEGRAM = f"""
-Do no forget to join our Telegram channel
+First install and set up the FEM app: {FEM_APP_LINK}
+
+Then join all required Telegram channels. Clicking Done confirms you completed these tasks.
 {TELEGRAM_LINKS}
 """
 
@@ -45,14 +49,17 @@ FOLLOW_TWITTER_TEXT = f"""
 🔹 Follow our X (Twitter) page
 {TWITTER_LINKS}
 
-Type in *your X username* to proceed
+Type in *your X username* when finished
 """
 
 SUBMIT_TIKTOK_TEXT = f"""
-🔹 Follow our TikTok page
+🔹 Follow our TikTok profile
 {TIKTOK_LINKS}
 
-Type in *your TikTok username* to proceed
+Follow and like these TikTok post(s):
+{TIKTOK_VIDEO_LINKS}
+
+Type in *your TikTok username* when finished
 """
 
 
@@ -63,8 +70,9 @@ Please make sure your wallet supports the *{AIRDROP_NETWORK}*
 """
 
 JOINED = f"""
-Thank you!
-Rewards would be sent out automatically to your {AIRDROP_NETWORK} address on the {AIRDROP_DATE}
+Application received. An admin will review your task completion.
+Approved participants receive {FEM_REWARD_AMOUNT} FEM at their FEM EVM wallet address.
+Successful payouts are announced in the campaign Telegram group.
 
 Don't forget to:
 🔸 Stay in the telegram channels

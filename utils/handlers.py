@@ -1,4 +1,10 @@
+import logging
+import threading
+from datetime import datetime
+
 import telegram
+from pymongo import ReturnDocument
+from web3 import Web3
 
 
 from telegram import (
@@ -16,6 +22,7 @@ from utils.message_strings import *
 from utils.jokes import getJoke
 from utils.states import *
 from utils import mongo
+from utils.payout import broadcast_payout, prepare_payout
 
 from multicolorcaptcha import CaptchaGenerator
 from bson.json_util import dumps
@@ -26,8 +33,14 @@ from utils.tempdata import (
     updateUserInfo,
 )
 
+PAYOUT_LOCK = threading.Lock()
+logger = logging.getLogger(__name__)
+
 
 def submit_details(update, context):
+    if not FEM_APP_LINK:
+        update.message.reply_text("The FEM app download link is not configured yet.")
+        return ConversationHandler.END
     update.message.reply_text(
         text=PROCEED_MESSAGE, parse_mode=telegram.ParseMode.MARKDOWN
     )
@@ -40,11 +53,16 @@ def submit_details(update, context):
 
 
 def follow_twitter(update, context):
+    user = update.effective_user
+    if getUserInfo(user.id) == False:
+        return startAgain(update, context)
+    updateUserInfo(user.id, "fem_app_task_claimed", True)
+    updateUserInfo(user.id, "telegram_task_claimed", True)
     update.message.reply_text(
         text=FOLLOW_TWITTER_TEXT, parse_mode=telegram.ParseMode.MARKDOWN
     )
     update.message.reply_text(
-        text="Type in *your Twitter username* to proceed",
+        text="Type in *your X username* to proceed",
         parse_mode=telegram.ParseMode.MARKDOWN,
         reply_markup=create_markup([["Cancel"]]),
     )
@@ -239,6 +257,7 @@ def submit_address(update, context):
         return startAgain(update, context)
 
     updateUserInfo(user.id, "twitter_username", update.message.text.strip())
+    updateUserInfo(user.id, "x_follow_task_claimed", True)
     update.message.reply_text(
         text=SUBMIT_TIKTOK_TEXT,
         parse_mode=telegram.ParseMode.MARKDOWN,
@@ -253,6 +272,8 @@ def submit_tiktok(update, context):
         return startAgain(update, context)
 
     updateUserInfo(user.id, "tiktok_username", update.message.text.strip())
+    updateUserInfo(user.id, "tiktok_follow_task_claimed", True)
+    updateUserInfo(user.id, "tiktok_like_task_claimed", True)
     update.message.reply_text(
         text=SUBMIT_BEP20_TEXT,
         parse_mode=telegram.ParseMode.MARKDOWN,
@@ -281,7 +302,7 @@ def start(update, context):
         )
         return LOOP
 
-    count = mongo.users.count()
+    count = mongo.users.count_documents({})
     if count >= MAX_USERS:
         return maxNumberReached(update, context)
 
@@ -307,11 +328,23 @@ def end_conversation(update, context):
     if getUserInfo(user.id) == False:
         return startAgain(update, context)
 
-    updateUserInfo(user.id, "bep20", update.message.text.strip())
+    wallet = update.message.text.strip()
+    if not Web3.is_address(wallet):
+        update.message.reply_text("Enter a valid FEM EVM wallet address (0x followed by 40 hex characters).")
+        return END_CONVERSATION
+    wallet = Web3.to_checksum_address(wallet)
+    existing_wallet = mongo.users.find_one({"bep20": {"$regex": f"^{wallet}$", "$options": "i"}})
+    if existing_wallet:
+        update.message.reply_text("That wallet is already registered for this airdrop.")
+        return END_CONVERSATION
+
+    updateUserInfo(user.id, "bep20", wallet)
     updateUserInfo(user.id, "chatId", update.effective_chat.id)
     updateUserInfo(user.id, "userId", user.id)
     updateUserInfo(user.id, "name", getName(user))
     updateUserInfo(user.id, "username", user.username)
+    updateUserInfo(user.id, "payout_status", "pending_review")
+    updateUserInfo(user.id, "application_submitted_at", datetime.utcnow())
     mongo.users.insert_one(getUserInfo(user.id))
     url = f"https://t.me/{context.bot.username}?start={user.id}"
 
@@ -336,6 +369,254 @@ def end_conversation(update, context):
     return LOOP
 
 
+def _is_private_admin(update):
+    user = update.effective_user
+    return (
+        update.effective_chat.type == "private"
+        and ADMIN_USERNAME
+        and user
+        and user.username == ADMIN_USERNAME
+    )
+
+
+def _admin_denied(update):
+    update.effective_message.reply_text("Admin command not authorized.")
+
+
+def getPendingPayouts(update, context):
+    if not _is_private_admin(update):
+        return _admin_denied(update)
+
+    pending = mongo.users.find(
+        {
+            "$or": [
+                {"payout_status": {"$exists": False}},
+                {"payout_status": {"$in": [None, "pending_review", "failed", "processing"]}},
+            ]
+        }
+    ).limit(50)
+    entries = []
+    for participant in pending:
+        entries.append(
+            "ID: {user_id} | status: {status}\nWallet: {wallet}\nX: {x}\nTikTok: {tiktok}".format(
+                user_id=participant.get("userId"),
+                status=participant.get("payout_status", "pending_review"),
+                wallet=participant.get("bep20", "missing"),
+                x=participant.get("twitter_username", "not provided"),
+                tiktok=participant.get("tiktok_username", "not provided"),
+            )
+        )
+        entries[-1] += (
+            "\nTask claims: FEM app={app}, Telegram={telegram}, X={x_follow}, "
+            "TikTok follow={tiktok_follow}, TikTok likes={tiktok_likes}".format(
+                app="yes" if participant.get("fem_app_task_claimed") else "no",
+                telegram="yes" if participant.get("telegram_task_claimed") else "no",
+                x_follow="yes" if participant.get("x_follow_task_claimed") else "no",
+                tiktok_follow="yes" if participant.get("tiktok_follow_task_claimed") else "no",
+                tiktok_likes="yes" if participant.get("tiktok_like_task_claimed") else "no",
+            )
+        )
+    update.effective_message.reply_text(
+        "No participants need review." if not entries else "\n\n".join(entries)
+    )
+
+
+def _publish_payout(update, participant):
+    transaction_hash = participant["payout_tx_hash"]
+    tx_link = f"{FEM_TX_EXPLORER_URL}{transaction_hash}" if FEM_TX_EXPLORER_URL else transaction_hash
+    update.bot.send_message(
+        chat_id=_announcement_chat_id(),
+        text=(
+            "FEM airdrop payout sent\n"
+            f"Amount: {FEM_REWARD_AMOUNT} FEM\n"
+            f"Wallet: {participant['bep20']}\n"
+            f"Transaction: {tx_link}"
+        ),
+    )
+    mongo.users.update_one(
+        {"userId": participant["userId"]},
+        {"$set": {"announcement_status": "announced", "announced_at": datetime.utcnow()}},
+    )
+
+
+def _announcement_chat_id():
+    chat_id = FEM_ANNOUNCEMENT_CHAT_ID
+    return int(chat_id) if chat_id.lstrip("-").isdigit() else chat_id
+
+
+def announceUpdate(update, context):
+    if not _is_private_admin(update):
+        return _admin_denied(update)
+    if not FEM_ANNOUNCEMENT_CHAT_ID:
+        update.effective_message.reply_text(
+            "Set FEM_ANNOUNCEMENT_CHAT_ID and make the bot an admin in the group first."
+        )
+        return
+
+    message = update.effective_message.text.partition(" ")[2].strip()
+    if not message:
+        update.effective_message.reply_text("Usage: /announce <message>")
+        return
+    if len(message) > 4096:
+        update.effective_message.reply_text("Announcement must be 4096 characters or fewer.")
+        return
+
+    try:
+        update.bot.send_message(chat_id=_announcement_chat_id(), text=message)
+    except Exception as error:
+        logger.error("Group announcement failed (%s)", type(error).__name__)
+        update.effective_message.reply_text("Could not post the announcement; check bot permissions.")
+        return
+    update.effective_message.reply_text("Announcement posted to the campaign group.")
+
+
+def approvePayout(update, context):
+    if not _is_private_admin(update):
+        return _admin_denied(update)
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        update.effective_message.reply_text("Usage: /approve <telegram_user_id>")
+        return
+    if not FEM_ANNOUNCEMENT_CHAT_ID:
+        update.effective_message.reply_text(
+            "Set FEM_ANNOUNCEMENT_CHAT_ID and make the bot an admin in that group before approving payouts."
+        )
+        return
+
+    user_id = int(context.args[0])
+    with PAYOUT_LOCK:
+        participant = mongo.users.find_one({"userId": user_id})
+        if not participant:
+            update.effective_message.reply_text("Participant not found.")
+            return
+        if participant.get("payout_status") == "paid":
+            update.effective_message.reply_text(
+                f"Already paid: {participant.get('payout_tx_hash', 'transaction hash unavailable')}"
+            )
+            return
+        if not participant.get("bep20"):
+            update.effective_message.reply_text("Participant has no saved FEM wallet.")
+            return
+
+        raw_transaction = participant.get("payout_raw_transaction")
+        transaction_hash = participant.get("payout_tx_hash")
+        if participant.get("payout_status") != "processing":
+            participant = mongo.users.find_one_and_update(
+                {
+                    "userId": user_id,
+                    "$or": [
+                        {"payout_status": {"$exists": False}},
+                        {"payout_status": {"$in": [None, "pending_review", "failed"]}},
+                    ],
+                },
+                {"$set": {"payout_status": "processing", "payout_started_at": datetime.utcnow()}},
+                return_document=ReturnDocument.AFTER,
+            )
+            if not participant:
+                update.effective_message.reply_text("Payout is already being processed or completed.")
+                return
+
+        if not raw_transaction or not transaction_hash:
+            try:
+                raw_transaction, transaction_hash = prepare_payout(participant["bep20"])
+            except Exception as error:
+                logger.error(
+                    "FEM payout preparation failed for user %s (%s)",
+                    user_id,
+                    type(error).__name__,
+                )
+                mongo.users.update_one(
+                    {"userId": user_id, "payout_status": "processing"},
+                    {
+                        "$set": {
+                            "payout_status": "pending_review",
+                            "payout_error": type(error).__name__,
+                        }
+                    },
+                )
+                update.effective_message.reply_text(
+                    "Payout not submitted due to an RPC or configuration error. Check Railway logs."
+                )
+                return
+            mongo.users.update_one(
+                {"userId": user_id, "payout_status": "processing"},
+                {
+                    "$set": {
+                        "payout_raw_transaction": raw_transaction,
+                        "payout_tx_hash": transaction_hash,
+                    }
+                },
+            )
+
+        try:
+            broadcast_payout(raw_transaction, transaction_hash)
+        except RuntimeError as error:
+            if str(error) == "FEM payout transaction reverted on chain":
+                mongo.users.update_one(
+                    {"userId": user_id},
+                    {
+                        "$set": {"payout_status": "failed", "payout_error": str(error)},
+                        "$unset": {"payout_raw_transaction": ""},
+                    },
+                )
+                update.effective_message.reply_text("The transaction reverted. Review and retry approval.")
+            else:
+                logger.error("FEM payout is unresolved for user %s (%s)", user_id, type(error).__name__)
+                update.effective_message.reply_text(
+                    f"Payout is still processing. Retry /approve {user_id} to check/rebroadcast the same transaction."
+                )
+            return
+        except Exception as error:
+            logger.error("FEM payout is unresolved for user %s (%s)", user_id, type(error).__name__)
+            update.effective_message.reply_text(
+                f"Payout is still processing. Retry /approve {user_id} to check/rebroadcast the same transaction."
+            )
+            return
+
+        mongo.users.update_one(
+            {"userId": user_id},
+            {
+                "$set": {
+                    "payout_status": "paid",
+                    "payout_paid_at": datetime.utcnow(),
+                    "announcement_status": "pending",
+                },
+                "$unset": {"payout_raw_transaction": ""},
+            },
+        )
+        participant["payout_tx_hash"] = transaction_hash
+        try:
+            _publish_payout(update, participant)
+        except Exception as error:
+            logger.error("Payout announcement failed for user %s (%s)", user_id, type(error).__name__)
+            update.effective_message.reply_text(
+                f"Paid {FEM_REWARD_AMOUNT} FEM. Announcement failed; /retryannouncements can retry it. Transaction: {transaction_hash}"
+            )
+            return
+        update.effective_message.reply_text(
+            f"Paid {FEM_REWARD_AMOUNT} FEM to {participant['bep20']} and announced transaction {transaction_hash}."
+        )
+
+
+def retryPayoutAnnouncements(update, context):
+    if not _is_private_admin(update):
+        return _admin_denied(update)
+    pending = mongo.users.find(
+        {"payout_status": "paid", "announcement_status": {"$ne": "announced"}}
+    ).limit(100)
+    sent = 0
+    for participant in pending:
+        try:
+            _publish_payout(update, participant)
+            sent += 1
+        except Exception as error:
+            logger.error(
+                "Payout announcement retry failed for user %s (%s)",
+                participant.get("userId"),
+                type(error).__name__,
+            )
+    update.effective_message.reply_text(f"Posted {sent} payout announcement(s).")
+
+
 # Admin commands
 def getList(update, context):
     user = update.message.from_user
@@ -358,11 +639,12 @@ def getStats(update, context):
     if user.username != ADMIN_USERNAME:
         return
     list = mongo.users.find({})
-    refes = mongo.users.find({"ref": {"$ne": False}}).count()
+    refes = mongo.users.count_documents({"ref": {"$ne": False}})
+    user_count = mongo.users.count_documents({})
     reply = f"""
-Currently there are *{list.count()} users* joined the airdrop!
+Currently there are *{user_count} users* joined the airdrop!
 Currently there are *{refes} users* joined by referrals
-A total of *{"{:,.2f}".format(float(AIRDROP_AMOUNT.replace(",",""))*list.count())} {COIN_SYMBOL}* will be distributed as participation rewards
+A total of *{"{:,.2f}".format(float(AIRDROP_AMOUNT.replace(",",""))*user_count)} {COIN_SYMBOL}* will be distributed as participation rewards
 A total of *{"{:,.2f}".format(REFERRAL_REWARD*refes)} {COIN_SYMBOL}* referral rewards will be distributed
 """
     update.message.reply_text(reply, parse_mode=telegram.ParseMode.MARKDOWN)

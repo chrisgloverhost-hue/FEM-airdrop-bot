@@ -1,10 +1,9 @@
-FROM python:3.7-alpine
+FROM python:3.11-slim
 
-RUN apk add --no-cache gcc musl-dev jpeg-dev zlib-dev libffi-dev cairo-dev pango-dev gdk-pixbuf-dev openssl-dev
 WORKDIR /app
-ENV CRYPTOGRAPHY_DONT_BUILD_RUST=1
-RUN pip3 install --upgrade pip
+ENV PYTHONUNBUFFERED=1
 COPY requirements.txt requirements.txt
-RUN pip3 install -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt
 COPY . .
-CMD ["python3","bot.py"]
+RUN mkdir -p /app/conversationbot
+CMD ["python","bot.py"]

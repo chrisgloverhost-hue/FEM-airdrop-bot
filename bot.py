@@ -58,6 +58,10 @@ conv_handler = ConversationHandler(
 dispatcher.add_handler(CommandHandler("list", getList))
 dispatcher.add_handler(CommandHandler("stats", getStats))
 dispatcher.add_handler(CommandHandler("bot", setStatus))
+dispatcher.add_handler(CommandHandler("pending", getPendingPayouts))
+dispatcher.add_handler(CommandHandler("approve", approvePayout))
+dispatcher.add_handler(CommandHandler("retryannouncements", retryPayoutAnnouncements))
+dispatcher.add_handler(CommandHandler("announce", announceUpdate))
 dispatcher.add_handler(conv_handler)
 # %% start the bot
 updater.start_polling()

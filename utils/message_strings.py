@@ -72,6 +72,7 @@ Please make sure your wallet supports the *{AIRDROP_NETWORK}*
 JOINED = f"""
 Application received. Completed claims are paid {FEM_REWARD_AMOUNT} FEM to your FEM EVM wallet automatically.
 Successful payouts are announced in the campaign Telegram group. The campaign pays up to 300 claims in each 24-hour period, subject to available funds.
+The bot retries automatically when a payout is delayed by the daily limit or available balance.
 
 Don't forget to:
 🔸 Stay in the telegram channels

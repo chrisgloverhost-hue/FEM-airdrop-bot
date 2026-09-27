@@ -33,6 +33,22 @@ def create_web3():
     return client
 
 
+def get_payout_wallet_info():
+    client = create_web3()
+    account = client.eth.account.from_key(FEM_PAYOUT_PRIVATE_KEY)
+    amount_wei = int(Decimal(FEM_REWARD_AMOUNT) * (10 ** FEM_DECIMALS))
+    gas_price = client.eth.gas_price
+    required_balance = amount_wei + 21000 * gas_price
+    balance = client.eth.get_balance(account.address)
+    divisor = Decimal(10) ** FEM_DECIMALS
+    return {
+        "address": account.address,
+        "balance": Decimal(balance) / divisor,
+        "required_balance": Decimal(required_balance) / divisor,
+        "can_pay_next": balance >= required_balance,
+    }
+
+
 def prepare_payout(recipient):
     client = create_web3()
     if not Web3.is_address(recipient):

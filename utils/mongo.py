@@ -15,6 +15,7 @@ else:
 myclient = pymongo.MongoClient(CONNECTION_STRING, serverSelectionTimeoutMS=10000)
 mydb = myclient["airdrop"]
 users = mydb["users"]
+bot_settings = mydb["bot_settings"]
 users.create_index(
     [("ref", pymongo.TEXT)], name="search_index", default_language="english"
 )

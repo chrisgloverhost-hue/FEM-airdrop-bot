@@ -18,12 +18,16 @@ This bot has all you need and very simple to use!
 - `/list` Returns the list of all participants in json format.
 - `/stats` Returns number of participants, referrals, distribution amounts
 - `/bot stop|pause|start` Manage airdrop status; stop, pause or start.
-- `/pending` Lists participants awaiting payout review, including their submitted task handles and wallet.
-- `/approve <telegram_user_id>` Retries a pending payout and posts the participant, reward, wallet, and transaction hash/link to the announcement group.
+- `/pending` Lists queued or processing claims, including submitted task handles and wallets.
+- `/payoutstatus` Shows recent payout count, queue depth, payout wallet balance, and announcement privacy mode.
+- `/registerpayoutalerts` Registers the admin's current private chat for low-balance and recovery alerts.
+- `/approve <telegram_user_id>` Manually retries a pending payout; announcement details follow `FEM_ANNOUNCEMENT_PRIVACY`.
 - `/retryannouncements` Retries Telegram announcements for payouts already confirmed on-chain.
 - `/announce <message>` Posts a campaign update to the same announcement group.
 
-Payout and announcement commands only work in a private chat with the configured `ADMIN_USERNAME`. After a participant submits their wallet, the bot immediately attempts to send `FEM_REWARD_AMOUNT` and announces confirmed payments with the participant's Telegram identity, wallet, and transaction link. A maximum of 300 confirmed payouts is allowed in any rolling 24-hour period, counting both automatic transfers and `/approve` retries. Claims over the limit remain pending for an admin to retry after the window resets. An insufficient reward-plus-gas balance prevents the transfer and leaves the claim available for retry after the wallet is funded. `/pending` shows saved claims for app setup, Telegram, X, TikTok follow, and TikTok likes. These actions are self-reported; the bot does not automatically verify app installation, Telegram membership, or X/TikTok activity. Automatic payouts make those checks especially important before deployment.
+Payout and announcement commands only work in a private chat with the configured `ADMIN_USERNAME`; they are not required for routine payouts. After a participant submits their wallet, the bot immediately attempts to send `FEM_REWARD_AMOUNT` and announces confirmed payments. A background job retries queued claims automatically. A maximum of 300 confirmed payouts is allowed in any rolling 24-hour period. Claims over the limit are paid automatically as slots reopen; an insufficient reward-plus-gas balance pauses the queue until funds are available. `/payoutstatus` reports the rolling limit and wallet balance. Use `/registerpayoutalerts` in the admin's private chat to receive low-balance and recovery alerts. Telegram membership is verified for every configured `TELEGRAM_CHAT_IDS` entry. FEM app setup and X/TikTok activity remain self-reported because the bot has no integration to verify those actions.
+
+Payout announcements default to `FEM_ANNOUNCEMENT_PRIVACY=user`, which shows a Telegram username when available, reward, and transaction link, but omits the Telegram ID and wallet address. Set it to `minimal` to omit the username, or `full` to include the name, Telegram ID, and wallet. Blockchain transaction details are public regardless of announcement mode.
 
 Campaign cap: `500000` participants × `40` FEM each = `20000000` FEM total. Set `MAX_USERS=500000` and keep `REFERRAL_REWARD=0` to keep the pool at 20 million FEM. You can also post directly in the Telegram group if your account has posting rights there.
 
@@ -31,7 +35,7 @@ Campaign cap: `500000` participants × `40` FEM each = `20000000` FEM total. Set
 - Create a Railway project from this GitHub repository and deploy it using the included Dockerfile.
 - Add a Railway MongoDB service and set `MONGO_URI` to its private connection URL.
 - Set the environment variables below in Railway. Replace the empty campaign URLs with official links.
-- Add the bot as an administrator in the Telegram announcement group and set `FEM_ANNOUNCEMENT_CHAT_ID` to its chat ID.
+- Add the bot as an administrator in the announcement group and in each Telegram channel to verify; set `FEM_ANNOUNCEMENT_CHAT_ID` and `TELEGRAM_CHAT_IDS`.
 - Send `/announce Your campaign update` to the bot in a private chat to post updates through the bot.
 - Start with `FEM_PAYOUT_ENABLED=NO`. Verify the RPC URL, chain ID, decimals, wallet balance, recipient, and test transaction before enabling payouts.
 - Run one bot replica because it uses Telegram long polling. No public domain or webhook is required.
@@ -48,13 +52,15 @@ For local Docker Compose, copy `.env.example` to `.env`, provide valid Telegram 
 - `TIKTOK_LINKS`: Comma-separated TikTok profile URLs.
 - `TIKTOK_VIDEO_LINKS`: Comma-separated TikTok post URLs participants must follow/like.
 - `TELEGRAM_LINKS`: Comma-separated public invite links displayed to participants.
+- `TELEGRAM_CHAT_IDS`: Comma-separated Telegram chat IDs or public `@usernames` checked for membership. The bot must be an administrator in each chat; claims cannot continue if this setting is empty or membership cannot be checked.
 - `FEM_REWARD_AMOUNT`: Native FEM amount per approved participant; set to `40`.
 - `FEM_DECIMALS`: Native FEM precision; typically `18`, but confirm with the FEM chain operators.
 - `FEM_RPC_URL`: Besu JSON-RPC endpoint reachable from Railway.
 - `FEM_CHAIN_ID`: Exact integer chain ID returned by the FEM RPC endpoint.
 - `FEM_PAYOUT_PRIVATE_KEY`: Dedicated, funded payout wallet private key. Add only as a Railway secret; never commit it or put it in chat. Keep only campaign funds and gas needed in this hot wallet.
-- `FEM_PAYOUT_ENABLED`: Must remain `NO` until chain configuration and a test transfer are confirmed; set `YES` to enable `/approve` transfers.
-- `FEM_ANNOUNCEMENT_CHAT_ID`: Telegram group chat ID for public payout announcements. The bot must be an administrator with permission to post. Payout approval is blocked until configured.
+- `FEM_PAYOUT_ENABLED`: Must remain `NO` until chain configuration and a test transfer are confirmed; set `YES` to enable automatic payouts and retries.
+- `FEM_ANNOUNCEMENT_CHAT_ID`: Telegram group chat ID for public payout announcements. The bot must be an administrator with permission to post. Payout transfers require this setting.
+- `FEM_ANNOUNCEMENT_PRIVACY`: Announcement detail level: `user` (default, username if available), `minimal` (no user identity), or `full` (name/username, Telegram ID, and wallet).
 - `FEM_TX_EXPLORER_URL`: Optional transaction URL prefix ending in `/`, used to make announcement links.
 - `AIRDROP_AMOUNT`: Legacy setting; the displayed and transferred participant reward comes from `FEM_REWARD_AMOUNT` (`40`).
 - `COIN_SYMBOL`: `FEM`.
@@ -63,6 +69,8 @@ For local Docker Compose, copy `.env.example` to `.env`, provide valid Telegram 
 - `AIRDROP_DATE`, `COIN_PRICE`, `REFERRAL_REWARD`, `WEBSITE_URL`, `EXPLORER_URL`, `MAX_USERS`, `MAX_REFS`, and `CAPTCHA_ENABLED`: Existing campaign settings.
 
 The included `.env.example` intentionally leaves official campaign links and live chain details empty. The application refuses to start without the FEM app, X, TikTok, and TikTok video links. Confirm the FEM RPC is the correct production chain before setting `FEM_PAYOUT_ENABLED=YES`.
+
+After deploying, open a private chat with the bot using the configured admin username and send `/registerpayoutalerts`. This registers that private chat as the destination for balance alerts.
 
 ## Local Docker Compose
 The local Docker Compose setup can use the `MONGO_INITDB_*` variables instead of `MONGO_URI`; run `docker-compose up -d` after configuring `.env`.

@@ -22,7 +22,7 @@ from utils.message_strings import *
 from utils.jokes import getJoke
 from utils.states import *
 from utils import mongo
-from utils.payout import broadcast_payout, prepare_payout
+from utils.payout import broadcast_payout, get_payout_wallet_info, prepare_payout
 
 from multicolorcaptcha import CaptchaGenerator
 from bson.json_util import dumps
@@ -57,6 +57,8 @@ def follow_twitter(update, context):
     user = update.effective_user
     if getUserInfo(user.id) == False:
         return startAgain(update, context)
+    if not _verify_telegram_memberships(update, context):
+        return FOLLOW_TWITTER
     updateUserInfo(user.id, "fem_app_task_claimed", True)
     updateUserInfo(user.id, "telegram_task_claimed", True)
     update.message.reply_text(
@@ -68,6 +70,41 @@ def follow_twitter(update, context):
         reply_markup=create_markup([["Cancel"]]),
     )
     return SUBMIT_ADDRESS
+
+
+def _telegram_chat_id(value):
+    return int(value) if value.lstrip("-").isdigit() else value
+
+
+def _verify_telegram_memberships(update, context):
+    if not TELEGRAM_CHAT_IDS:
+        update.message.reply_text(
+            "Telegram membership verification is not configured. Please contact the campaign admin."
+        )
+        return False
+
+    for configured_chat_id in TELEGRAM_CHAT_IDS:
+        try:
+            member = context.bot.get_chat_member(
+                chat_id=_telegram_chat_id(configured_chat_id),
+                user_id=update.effective_user.id,
+            )
+        except Exception as error:
+            logger.warning("Telegram membership check failed (%s)", type(error).__name__)
+            update.message.reply_text(
+                "I could not verify your Telegram membership. Please try again later."
+            )
+            return False
+
+        if member.status in ("left", "kicked") or (
+            member.status == "restricted" and not member.is_member
+        ):
+            update.message.reply_text(
+                "Please join all required Telegram channels, then tap Done again.\n\n"
+                + TELEGRAM_LINKS
+            )
+            return False
+    return True
 
 
 def maxNumberReached(update, context):
@@ -369,12 +406,14 @@ def end_conversation(update, context):
     elif result == "daily_limit":
         message = (
             "Your application is complete and saved. The 300-payout limit for the last "
-            "24 hours has been reached; an admin can retry your payout after the limit resets."
+            "24 hours has been reached. The bot will send your reward automatically "
+            "when the next payout slot opens."
         )
     elif result == "insufficient_funds":
         message = (
             "Your application is complete and saved, but the payout wallet currently "
-            "does not have enough FEM for the reward and transaction fee."
+            "does not have enough FEM for the reward and transaction fee. The bot "
+            "will retry automatically when funds are available."
         )
     else:
         message = f"Your application is complete and saved. {detail}"
@@ -441,16 +480,24 @@ def _publish_payout(bot, participant):
     transaction_hash = participant["payout_tx_hash"]
     tx_link = f"{FEM_TX_EXPLORER_URL}{transaction_hash}" if FEM_TX_EXPLORER_URL else transaction_hash
     username = participant.get("username")
-    display_name = f"@{username}" if username else participant.get("name", "Telegram user")
+    lines = ["FEM airdrop payout sent"]
+    if FEM_ANNOUNCEMENT_PRIVACY == "user":
+        lines.append(f"User: @{username}" if username else "User: Participant")
+    elif FEM_ANNOUNCEMENT_PRIVACY == "full":
+        display_name = f"@{username}" if username else participant.get("name", "Participant")
+        lines.extend(
+            [
+                f"User: {display_name}",
+                f"Telegram ID: {participant['userId']}",
+                f"Wallet: {participant['bep20']}",
+            ]
+        )
+    lines.extend(
+        [f"Amount: {FEM_REWARD_AMOUNT} FEM", f"Transaction: {tx_link}"]
+    )
     bot.send_message(
         chat_id=_announcement_chat_id(),
-        text=(
-            "FEM airdrop payout sent\n"
-            f"User: {display_name} (ID: {participant['userId']})\n"
-            f"Amount: {FEM_REWARD_AMOUNT} FEM\n"
-            f"Wallet: {participant['bep20']}\n"
-            f"Transaction: {tx_link}"
-        ),
+        text="\n".join(lines),
     )
     mongo.users.update_one(
         {"userId": participant["userId"]},
@@ -565,6 +612,140 @@ def _execute_payout(bot, user_id):
             )
         return "paid", (
             f"Paid {FEM_REWARD_AMOUNT} FEM to {participant['bep20']} and announced transaction {transaction_hash}."
+        )
+
+
+def processPendingPayouts(context):
+    if FEM_PAYOUT_ENABLED != "YES" or not FEM_ANNOUNCEMENT_CHAT_ID:
+        return
+
+    pending = mongo.users.find(
+        {
+            "payout_status": {
+                "$in": ["pending_review", "failed", "processing", "insufficient_funds"]
+            },
+            "bep20": {"$exists": True},
+        }
+    ).sort("application_submitted_at", 1).limit(MAX_DAILY_PAYOUTS)
+
+    for participant in pending:
+        result, detail = _execute_payout(context.bot, participant["userId"])
+        if result in ("daily_limit", "insufficient_funds"):
+            logger.info("Automatic payout queue paused: %s", result)
+            break
+        if result == "error":
+            logger.warning(
+                "Automatic payout retry failed for user %s: %s",
+                participant["userId"],
+                detail,
+            )
+
+
+def getPayoutStatus(update, context):
+    if not _is_private_admin(update):
+        return _admin_denied(update)
+
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    recent_filter = {
+        "payout_status": "paid",
+        "payout_paid_at": {"$gte": cutoff},
+    }
+    paid_count = mongo.users.count_documents(recent_filter)
+    queued_count = mongo.users.count_documents(
+        {
+            "payout_status": {
+                "$in": ["pending_review", "failed", "processing", "insufficient_funds"]
+            }
+        }
+    )
+    lines = [
+        f"Automatic payouts: {'enabled' if FEM_PAYOUT_ENABLED == 'YES' else 'disabled'}",
+        f"Paid in the last 24 hours: {paid_count}/{MAX_DAILY_PAYOUTS}",
+        f"Queued claims: {queued_count}",
+        f"Announcement privacy: {FEM_ANNOUNCEMENT_PRIVACY}",
+    ]
+    if paid_count >= MAX_DAILY_PAYOUTS:
+        oldest = mongo.users.find_one(recent_filter, sort=[("payout_paid_at", 1)])
+        next_slot = oldest["payout_paid_at"] + timedelta(hours=24)
+        lines.append(f"Next payout slot (UTC): {next_slot.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    if FEM_PAYOUT_ENABLED == "YES":
+        try:
+            wallet = get_payout_wallet_info()
+            lines.extend(
+                [
+                    f"Payout wallet: {wallet['address']}",
+                    f"Balance: {wallet['balance']:,.6f} FEM",
+                    f"Needed for next payout (reward + gas): {wallet['required_balance']:,.6f} FEM",
+                    f"Can pay next claim: {'yes' if wallet['can_pay_next'] else 'no'}",
+                ]
+            )
+        except Exception as error:
+            logger.warning("Payout status check failed (%s)", type(error).__name__)
+            lines.append(f"Wallet status unavailable ({type(error).__name__}).")
+    update.effective_message.reply_text("\n".join(lines)
+    )
+
+
+def registerPayoutAlerts(update, context):
+    if not _is_private_admin(update):
+        return _admin_denied(update)
+    mongo.bot_settings.update_one(
+        {"_id": "payout_alerts"},
+        {
+            "$set": {
+                "admin_chat_id": update.effective_chat.id,
+                "low_balance_alert_active": False,
+            }
+        },
+        upsert=True,
+    )
+    update.effective_message.reply_text(
+        "Low-balance alerts will be sent to this private chat."
+    )
+    checkPayoutBalance(context)
+
+
+def checkPayoutBalance(context):
+    if FEM_PAYOUT_ENABLED != "YES" or not FEM_ANNOUNCEMENT_CHAT_ID:
+        return
+    try:
+        wallet = get_payout_wallet_info()
+    except Exception as error:
+        logger.warning("Payout balance check failed (%s)", type(error).__name__)
+        return
+
+    settings = mongo.bot_settings.find_one({"_id": "payout_alerts"}) or {}
+    admin_chat_id = settings.get("admin_chat_id")
+    alert_active = settings.get("low_balance_alert_active", False)
+    if not wallet["can_pay_next"] and not alert_active:
+        if not admin_chat_id:
+            logger.warning("Payout wallet is low; register a private alert chat with /registerpayoutalerts")
+            return
+        context.bot.send_message(
+            chat_id=admin_chat_id,
+            text=(
+                "FEM payout wallet is below the amount needed for the next reward and gas.\n"
+                f"Balance: {wallet['balance']:,.6f} FEM\n"
+                f"Needed: {wallet['required_balance']:,.6f} FEM\n"
+                f"Wallet: {wallet['address']}"
+            ),
+        )
+        mongo.bot_settings.update_one(
+            {"_id": "payout_alerts"},
+            {"$set": {"low_balance_alert_active": True}},
+            upsert=True,
+        )
+    elif wallet["can_pay_next"] and alert_active:
+        if admin_chat_id:
+            context.bot.send_message(
+                chat_id=admin_chat_id,
+                text="FEM payout wallet balance is sufficient again; automatic payouts can continue.",
+            )
+        mongo.bot_settings.update_one(
+            {"_id": "payout_alerts"},
+            {"$set": {"low_balance_alert_active": False}},
+            upsert=True,
         )
 
 

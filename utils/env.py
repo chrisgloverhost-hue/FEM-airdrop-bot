@@ -20,13 +20,20 @@ EXPLORER_URL = os.environ["EXPLORER_URL"]
 ADMIN_USERNAME = os.environ["ADMIN_USERNAME"]
 
 TWITTER_LINKS = os.environ["TWITTER_LINKS"]
+TIKTOK_LINKS = os.environ["TIKTOK_LINKS"]
 TELEGRAM_LINKS = os.environ["TELEGRAM_LINKS"]
 MAX_USERS = int(os.environ["MAX_USERS"])
 MAX_REFS = int(os.environ["MAX_REFS"])
 CAPTCHA_ENABLED = os.environ["CAPTCHA_ENABLED"]
 
-TWITTER_LINKS = TWITTER_LINKS.split(",")
+TWITTER_LINKS = [link.strip() for link in TWITTER_LINKS.split(",") if link.strip()]
+if not TWITTER_LINKS:
+    raise ValueError("TWITTER_LINKS must contain at least one X profile URL")
+TIKTOK_LINKS = [link.strip() for link in TIKTOK_LINKS.split(",") if link.strip()]
+if not TIKTOK_LINKS:
+    raise ValueError("TIKTOK_LINKS must contain at least one TikTok profile URL")
 TELEGRAM_LINKS = TELEGRAM_LINKS.split(",")
 TWITTER_LINKS = "\n".join(TWITTER_LINKS)
+TIKTOK_LINKS = "\n".join(TIKTOK_LINKS)
 TELEGRAM_LINKS = "\n".join(TELEGRAM_LINKS)
 STATUS_PATH = "./conversationbot/botconfig.p"

@@ -7,4 +7,5 @@
     LOOP,
     SUREWANTTO,
     CAPTCHASTATE,
-) = range(8)
+    SUBMIT_TIKTOK,
+) = range(9)

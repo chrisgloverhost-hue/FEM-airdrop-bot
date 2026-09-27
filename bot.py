@@ -34,6 +34,7 @@ states = {
         MessageHandler(Filters.regex("^Done$"), follow_twitter),
         cancelHandler,
     ],
+    SUBMIT_TIKTOK: [cancelHandler, MessageHandler(Filters.text, submit_tiktok)],
     SUBMIT_ADDRESS: [cancelHandler, MessageHandler(Filters.text, submit_address)],
     END_CONVERSATION: [
         cancelHandler,

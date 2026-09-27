@@ -27,7 +27,8 @@ PROCEED_MESSAGE = f"""
 
 ✏️ Mandatory Tasks:
 - Join our telegram channels
-- Follow our Twitter page
+- Follow our X (Twitter) page
+- Follow our TikTok page
 
 NOTE: Users found Cheating would be disqualified & banned immediately.
 
@@ -41,8 +42,17 @@ Do no forget to join our Telegram channel
 """
 
 FOLLOW_TWITTER_TEXT = f"""
-🔹 Follow our Twitter page
+🔹 Follow our X (Twitter) page
 {TWITTER_LINKS}
+
+Type in *your X username* to proceed
+"""
+
+SUBMIT_TIKTOK_TEXT = f"""
+🔹 Follow our TikTok page
+{TIKTOK_LINKS}
+
+Type in *your TikTok username* to proceed
 """
 
 

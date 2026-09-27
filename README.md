@@ -3,7 +3,7 @@
 This bot has all you need and very simple to use!
 ### Some of the great futures
 
-- Ask user to follow twitter and join telegram groups, multipe groups and twitter links are supported.
+- Ask users to follow X/Twitter and TikTok, and join Telegram groups; multiple links are supported.
 - Check if a correct wallet address has been provided
 - Very easy to use.
 - Persistance, the chat will remain persistant even if you restart the bot.
@@ -56,6 +56,8 @@ This bot has all you need and very simple to use!
 - `TWITTER_LINKS` Twitter page links seperated by comma
     - Example: `https://twitter.com/bitcoin,`
     - Example: `https://twitter.com/bitcoin,https://twitter.com/ethereum`
+- `TIKTOK_LINKS` TikTok profile links separated by comma. Users must follow the profiles and provide their TikTok username.
+    - Example: `https://www.tiktok.com/@exampleaddress`
 - `TELEGRAM_LINKS` Telegram group links seperated by comma
     - Example: `https://t.me/single,`
     - Example: `https://t.me/multi,https://t.me/ple`

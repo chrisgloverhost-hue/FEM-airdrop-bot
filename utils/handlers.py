@@ -145,11 +145,13 @@ Here is *your referral link*
         refferals = str(info["refCount"])
         bep20Address = str(info["bep20"])
         twitterUsername = str(info["twitter_username"])
+        tiktokUsername = str(info.get("tiktok_username", ""))
         reply = f"""
 Name: {name}
 Referrals: {refferals}
 {AIRDROP_NETWORK} address: {bep20Address}
-Twitter Username: {twitterUsername}
+X Username: {twitterUsername}
+TikTok Username: {tiktokUsername}
 Balance: {balance}
 """
     if reply == "":
@@ -237,6 +239,20 @@ def submit_address(update, context):
         return startAgain(update, context)
 
     updateUserInfo(user.id, "twitter_username", update.message.text.strip())
+    update.message.reply_text(
+        text=SUBMIT_TIKTOK_TEXT,
+        parse_mode=telegram.ParseMode.MARKDOWN,
+        reply_markup=create_markup([["Cancel"]]),
+    )
+    return SUBMIT_TIKTOK
+
+
+def submit_tiktok(update, context):
+    user = update.message.from_user
+    if getUserInfo(user.id) == False:
+        return startAgain(update, context)
+
+    updateUserInfo(user.id, "tiktok_username", update.message.text.strip())
     update.message.reply_text(
         text=SUBMIT_BEP20_TEXT,
         parse_mode=telegram.ParseMode.MARKDOWN,
